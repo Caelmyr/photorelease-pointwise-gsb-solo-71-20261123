@@ -4,7 +4,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, send_f
 
 from image_lab.validation import Invalid
 
-from . import demo, images, issues, model
+from . import demo, images, issues, model, similarity
 from .store import Library
 
 
@@ -148,6 +148,7 @@ def install(app, directory):
                 model.change_style(photo, data["style"])
             if "used" in data:
                 photo["used"] = checked_flag(data["used"])
+                photo["represented_by"] = None
             if "approved" in data:
                 photo["approved"] = checked_flag(data["approved"])
             if "move" in data:
@@ -239,6 +240,28 @@ def install(app, directory):
     def inspect():
         raw, _ = upload(issues.MAX_ARCHIVE)
         return jsonify(issues.inspect_archive(raw))
+
+    @release.post("/desks/<key>/bursts/analyze")
+    def burst_analyze(key):
+        data = body()
+        desk = library.open(key)
+        return jsonify(similarity.analyze(library, desk, data))
+
+    @release.post("/desks/<key>/bursts/difference")
+    def burst_difference(key):
+        data = body()
+        desk = library.open(key)
+        image, _ = similarity.difference_image(library, desk, data)
+        return image_response(image)
+
+    @release.post("/desks/<key>/bursts/apply")
+    def burst_apply(key):
+        data = body()
+
+        def change(desk):
+            model.apply_burst(desk, data)
+
+        return jsonify(library.mutate(key, data.get("revision"), change)), 201
 
     app.register_blueprint(release)
 

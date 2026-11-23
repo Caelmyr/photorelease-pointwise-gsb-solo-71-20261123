@@ -155,6 +155,7 @@ function show() {
   const included = desk.photos.filter((entry) => entry.used);
   byId("contact-sheet").disabled = included.length === 0;
   byId("make-issue").disabled = included.length === 0;
+  byId("burst-review").disabled = desk.photos.length < 2;
   byId("photo-list").replaceChildren(...desk.photos.map((item) => {
     const tail = !item.used ? "Excluded" : (item.approved ? "Approved" : "Needs review");
     const button = collectionEntry(item.name, tail, () => selectPhoto(item.id), "photo-item");
@@ -164,6 +165,10 @@ function show() {
     thumbnail.src = `${photoURL(item)}/image/thumb`;
     button.prepend(thumbnail);
     button.classList.toggle("active", state.photo === item.id);
+    if (item.represented_by) {
+      const representative = photoById(item.represented_by);
+      button.append(node("small", `Represented by ${representative ? representative.name : "a removed photo"}`));
+    }
     return button;
   }));
   byId("empty-desk").hidden = Boolean(photo);
@@ -177,6 +182,21 @@ function show() {
   byId("review-state").textContent = photo.approved ? "Approved" : "Needs review";
   byId("review-state").classList.toggle("approved", photo.approved);
   byId("include-photo").checked = photo.used;
+  const representation = byId("representation");
+  representation.replaceChildren();
+  if (photo.represented_by) {
+    const representative = photoById(photo.represented_by);
+    representation.hidden = false;
+    representation.append(node("small", `Unchecked in this draft by burst review; represented by ${representative ? representative.name : "a removed photo"}.`));
+  } else {
+    const followers = desk.photos.filter((item) => item.represented_by === photo.id);
+    if (followers.length) {
+      representation.hidden = false;
+      representation.append(node("small", `Represents ${followers.length} unchecked photo${followers.length === 1 ? "" : "s"} in this draft.`));
+    } else {
+      representation.hidden = true;
+    }
+  }
   const index = desk.photos.indexOf(photo);
   byId("earlier").disabled = index === 0;
   byId("later").disabled = index === desk.photos.length - 1;
@@ -597,6 +617,411 @@ overlay.addEventListener("pointerup", attempt(async (event) => {
     dialog.close();
   }, false);
 }));
+
+/* Burst review: group near-identical bursts by a watched region. */
+const GRID_NOTE = 24;
+const burst = {analysis: null, mode: "anchor", threshold: 90, picks: new Set(), box: null, base: null};
+
+function photoById(id) {
+  return state.desk?.photos.find((photo) => photo.id === id);
+}
+
+function burstPairKey(left, right) {
+  return left < right ? `${left}|${right}` : `${right}|${left}`;
+}
+
+function burstPair(analysis, left, right) {
+  return analysis.pairMap.get(burstPairKey(left, right));
+}
+
+function recomputeGroups(analysis, mode, threshold) {
+  const ids = analysis.photo_ids;
+  const used = new Set();
+  const groups = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    if (used.has(i)) continue;
+    const group = [i];
+    for (let j = i + 1; j < ids.length; j += 1) {
+      if (used.has(j)) continue;
+      if (mode === "anchor") {
+        if (burstPair(analysis, ids[i], ids[j]).similarity >= threshold) group.push(j);
+      } else if (group.every((member) => burstPair(analysis, ids[member], ids[j]).similarity >= threshold)) {
+        group.push(j);
+      }
+    }
+    group.forEach((index) => used.add(index));
+    groups.push(group);
+  }
+  return groups.map((group) => {
+    let representativePosition = 0;
+    if (mode === "pairwise" && group.length > 1) {
+      let best = -Infinity;
+      group.forEach((candidate, position) => {
+        const score = group.reduce((sum, other) =>
+          other === candidate ? sum : sum + burstPair(analysis, ids[candidate], ids[other]).similarity, 0);
+        if (score > best) {
+          best = score;
+          representativePosition = position;
+        }
+      });
+    }
+    let worst = null;
+    for (let a = 0; a < group.length; a += 1) {
+      for (let b = a + 1; b < group.length; b += 1) {
+        const metrics = burstPair(analysis, ids[group[a]], ids[group[b]]);
+        if (!worst || metrics.similarity < worst.similarity) {
+          worst = {...metrics, left: ids[group[a]], right: ids[group[b]]};
+        }
+      }
+    }
+    return {
+      members: group.map((index) => ids[index]),
+      representative: ids[group[representativePosition]],
+      worst_pair: worst,
+    };
+  });
+}
+
+function burstPoint(svg, photo, event) {
+  const bounds = svg.getBoundingClientRect();
+  const clamp = (value) => Math.max(0, Math.min(1, value));
+  return [
+    photo.width * clamp((event.clientX - bounds.left) / bounds.width),
+    photo.height * clamp((event.clientY - bounds.top) / bounds.height),
+  ];
+}
+
+function burstBoxSVG(box, className) {
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", box[0]);
+  rect.setAttribute("y", box[1]);
+  rect.setAttribute("width", box[2] - box[0]);
+  rect.setAttribute("height", box[3] - box[1]);
+  rect.setAttribute("class", className);
+  return rect;
+}
+
+function burstCanvas(photo, initialBox) {
+  const frame = node("div", undefined, "burst-frame");
+  const image = node("img");
+  image.alt = `${photo.name} source`;
+  image.src = versioned(`${deskURL()}/photos/${photo.id}/image/working`);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${photo.width} ${photo.height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  let drag = null;
+  const paint = () => svg.replaceChildren(...(burst.box ? [burstBoxSVG(burst.box, "selection")] : []),
+    ...(drag ? [burstBoxSVG(orderedBox(drag.start, drag.end), "draft-box")] : []));
+  svg.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    svg.setPointerCapture(event.pointerId);
+    drag = {start: burstPoint(svg, photo, event), end: null};
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    drag.end = burstPoint(svg, photo, event);
+    paint();
+  });
+  const finish = attempt(async (event) => {
+    if (!drag) return;
+    const box = orderedBox(drag.start, burstPoint(svg, photo, event));
+    drag = null;
+    if (box[2] - box[0] >= 24 && box[3] - box[1] >= 24) {
+      burst.box = box.map((value) => Math.round(value));
+    } else {
+      notice("The watch region needs to be at least 24 pixels wide and tall.");
+    }
+    paint();
+  });
+  svg.addEventListener("pointerup", finish);
+  svg.addEventListener("pointercancel", () => { drag = null; paint(); });
+  frame.append(image, svg);
+  if (initialBox) burst.box = initialBox;
+  paint();
+  return frame;
+}
+
+function openBurst() {
+  const first = state.desk.photos[0];
+  const sameSize = state.desk.photos.filter((photo) =>
+    photo.width === first.width && photo.height === first.height);
+  burst.analysis = null;
+  burst.mode = "anchor";
+  burst.threshold = 90;
+  burst.picks = new Set(sameSize.slice(0, 12).map((photo) => photo.id));
+  burst.box = null;
+  burst.base = photoById([...burst.picks][0]) || activePhoto() || first;
+  renderBurstSetup();
+}
+
+function renderBurstSetup() {
+  const photo = burst.base || activePhoto();
+  const wrap = node("div", undefined, "burst-setup");
+  const intro = node("p", "Pick the burst photographs (same camera position and size), then circle the region that must stay comparable, for example hands on a repair bench.", "muted");
+  const pickList = node("div", undefined, "burst-picks");
+  for (const item of state.desk.photos) {
+    const label = node("label");
+    const checkbox = node("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = burst.picks.has(item.id);
+    const sameDimension = item.width === photo.width && item.height === photo.height;
+    checkbox.disabled = !sameDimension || (burst.picks.size >= 12 && !burst.picks.has(item.id));
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        if (burst.picks.size >= 12) {
+          checkbox.checked = false;
+          notice("A burst set can contain up to 12 photographs.");
+          return;
+        }
+        burst.picks.add(item.id);
+      } else burst.picks.delete(item.id);
+    });
+    label.append(checkbox, node("span", `${item.name} · ${item.width} × ${item.height} px`));
+    if (!sameDimension) label.append(node("small", "different size"));
+    pickList.append(label);
+  }
+  const baseLine = node("label", "Circle the watch region on ");
+  const baseSelect = node("select");
+  for (const item of state.desk.photos) {
+    const option = new Option(item.name, item.id);
+    option.disabled = item.width !== photo.width || item.height !== photo.height;
+    baseSelect.append(option);
+  }
+  baseSelect.value = photo.id;
+  baseSelect.addEventListener("change", () => {
+    burst.base = photoById(baseSelect.value);
+    burst.box = null;
+    renderBurstSetup();
+  });
+  baseLine.append(baseSelect);
+  const marks = node("select");
+  marks.append(new Option("…or reuse an existing marked region", ""));
+  for (const mark of photo.marks) {
+    marks.append(new Option(`${mark.label || mark.kind} region [${mark.box.join(", ")}]`, mark.box.join(",")));
+  }
+  marks.addEventListener("change", () => {
+    if (!marks.value) return;
+    burst.box = marks.value.split(",").map(Number);
+    renderBurstSetup();
+  });
+  const modeField = node("div", undefined, "burst-modes");
+  const modes = [
+    ["anchor", "Compared with the representative", "Every group member must resemble the photo you keep; groups can chain through gradual change."],
+    ["pairwise", "All photos resemble each other", "Every pair inside a group must pass the threshold, so a group stays mutually interchangeable."],
+  ];
+  for (const [value, title, hint] of modes) {
+    const choice = node("label");
+    const radio = node("input");
+    radio.type = "radio";
+    radio.name = "burst-mode";
+    radio.checked = burst.mode === value;
+    radio.addEventListener("change", () => { burst.mode = value; });
+    choice.append(radio, node("strong", title), node("small", hint));
+    modeField.append(choice);
+  }
+  const thresholdLine = node("label", `Similarity threshold: ${burst.threshold}`);
+  const slider = node("input");
+  slider.type = "range";
+  slider.min = "50";
+  slider.max = "100";
+  slider.value = String(burst.threshold);
+  slider.addEventListener("input", () => {
+    burst.threshold = Number(slider.value);
+    thresholdLine.firstChild.textContent = `Similarity threshold: ${burst.threshold}`;
+  });
+  thresholdLine.append(slider);
+  const compare = node("button", "Compare photographs", "primary");
+  compare.type = "button";
+  compare.addEventListener("click", attempt(async () => {
+    if (burst.picks.size < 2) throw new Error("Choose at least two photographs.");
+    if (!burst.box) throw new Error("Draw a watch region first.");
+    compare.disabled = true;
+    try {
+      const analysis = await request(`${deskURL()}/bursts/analyze`, "POST", {
+        mode: burst.mode, threshold: burst.threshold,
+        photo_ids: [...burst.picks], box: burst.box,
+      });
+      analysis.pairMap = new Map(analysis.pairs.map((pair) => [burstPairKey(pair.left, pair.right), pair]));
+      burst.analysis = analysis;
+      burst.mode = analysis.mode;
+      burst.threshold = analysis.threshold;
+      renderBurstResults();
+    } finally {
+      compare.disabled = false;
+    }
+  }));
+  const actions = node("div", undefined, "dialog-actions");
+  actions.append(compare, action("Applied grouping history", renderBurstHistory));
+  const body = node("div");
+  body.append(intro, node("h3", "1. Photographs"), pickList,
+    node("h3", "2. Watch region"), baseLine, marks, burstCanvas(photo, burst.box),
+    node("h3", "3. Grouping rule"), modeField, thresholdLine, actions);
+  wrap.append(body);
+  openDialog("Burst review", wrap);
+}
+
+function renderBurstResults() {
+  const analysis = burst.analysis;
+  const groups = recomputeGroups(analysis, burst.mode, burst.threshold);
+  const unchecked = groups.reduce((count, group) => count + group.members.length - 1, 0);
+  const wrap = node("div", undefined, "burst-results");
+  wrap.append(node("p", `${groups.length} group${groups.length === 1 ? "" : "s"} at similarity ${burst.threshold}+ · applying unchecks ${unchecked} of ${analysis.photo_ids.length} photos in this draft only.`, "muted"));
+
+  const modeField = node("div", undefined, "burst-modes");
+  for (const [value, title] of [["anchor", "Compared with the representative"], ["pairwise", "All photos resemble each other"]]) {
+    const choice = node("label");
+    const radio = node("input");
+    radio.type = "radio";
+    radio.name = "burst-mode-live";
+    radio.checked = burst.mode === value;
+    radio.addEventListener("change", () => { burst.mode = value; renderBurstResults(); });
+    choice.append(radio, node("strong", title));
+    modeField.append(choice);
+  }
+  const thresholdLine = node("label", `Similarity threshold: ${burst.threshold}`);
+  const slider = node("input");
+  slider.type = "range";
+  slider.min = "50";
+  slider.max = "100";
+  slider.value = String(burst.threshold);
+  slider.addEventListener("input", () => {
+    burst.threshold = Number(slider.value);
+    thresholdLine.firstChild.textContent = `Similarity threshold: ${burst.threshold}`;
+    renderBurstResults();
+  });
+  thresholdLine.append(slider);
+  wrap.append(modeField, thresholdLine);
+
+  groups.forEach((group, groupIndex) => {
+    const card = node("fieldset", undefined, "burst-group");
+    card.append(node("legend", `Group ${groupIndex + 1} · ${group.members.length} photo${group.members.length === 1 ? "" : "s"}`));
+    if (group.members.length === 1) {
+      card.append(node("p", "No other selected photo reaches this threshold.", "muted"));
+    }
+    for (const memberId of group.members) {
+      const row = node("div", undefined, "burst-member");
+      const pick = node("label");
+      const radio = node("input");
+      radio.type = "radio";
+      radio.name = `rep-${groupIndex}`;
+      radio.checked = memberId === group.representative;
+      radio.addEventListener("change", () => {
+        group.representative = memberId;
+      });
+      const thumb = node("img");
+      thumb.src = `${deskURL()}/photos/${memberId}/image/thumb`;
+      thumb.alt = "";
+      const detail = node("span", photoById(memberId)?.name || "Removed photo");
+      if (memberId !== group.representative && group.worst_pair) {
+        const toRep = burstPair(analysis, memberId, group.representative);
+        if (toRep) detail.append(node("small", ` · ${toRep.similarity} similar to representative`));
+      } else {
+        detail.append(node("small", " · representative"));
+      }
+      pick.append(radio, thumb, detail);
+      row.append(pick);
+      card.append(row);
+    }
+    if (group.worst_pair) {
+      const worst = group.worst_pair;
+      const line = node("p", undefined, "burst-worst");
+      line.append(node("small", `Largest difference inside group: ${photoById(worst.left)?.name} ↔ ${photoById(worst.right)?.name} · similarity ${worst.similarity} · mean error ${worst.mae} · shift ${worst.shift[0]}, ${worst.shift[1]} px`));
+      line.append(action("View where it differs", () => renderBurstDifference(worst)));
+      card.append(line);
+    }
+    wrap.append(card);
+  });
+
+  const actions = node("div", undefined, "dialog-actions");
+  actions.append(
+    action("← Reselect photos", renderBurstSetup),
+    action("Applied grouping history", renderBurstHistory),
+  );
+  const apply = node("button", "Apply to this draft", "primary");
+  apply.type = "button";
+  apply.addEventListener("click", attempt(async () => {
+    await request(`${deskURL()}/bursts/apply`, "POST", {
+      revision: state.desk.revision,
+      mode: burst.mode, threshold: burst.threshold, box: analysis.box,
+      groups: groups.map((group) => ({members: group.members, representative: group.representative})),
+    });
+    dialog.close();
+    await acceptDesk(state.desk);
+    notice(`Applied the grouping: ${unchecked} photo${unchecked === 1 ? "" : "s"} represented and unchecked. Saved issues were not changed.`);
+  }));
+  actions.append(apply);
+  wrap.append(actions);
+  openDialog("Burst review", wrap);
+}
+
+async function renderBurstDifference(worst) {
+  const response = await fetch(`${deskURL()}/bursts/difference`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({photo_ids: [worst.left, worst.right], box: burst.analysis.box}),
+  });
+  if (!response.ok) {
+    let message = "The difference view could not be built.";
+    try {
+      message = (await response.json()).error || message;
+    } catch (error) {
+      // keep the generic message when the body is not JSON
+    }
+    throw new Error(message);
+  }
+  const objectURL = URL.createObjectURL(await response.blob());
+  const image = node("img");
+  image.src = objectURL;
+  image.alt = "Kept photo, aligned other photo and highlighted pixel differences";
+  image.addEventListener("load", () => URL.revokeObjectURL(objectURL));
+  image.addEventListener("error", () => URL.revokeObjectURL(objectURL));
+  const rows = GRID_NOTE;
+  const wrap = node("div", undefined, "burst-difference");
+  wrap.append(
+    node("p", `${photoById(worst.left)?.name} kept on the left; ${photoById(worst.right)?.name} aligned by a shift of (${worst.shift[0]}, ${worst.shift[1]}) px. Similarity ${worst.similarity}, mean per-channel error ${worst.mae}.`, "muted"),
+    image,
+    node("p", `Pink pixels changed inside the watch region. The yellow outline marks the most different of the ${rows} comparison blocks (block ${worst.max_cell + 1}).`, "muted"),
+  );
+  const back = action("← Back to groups", () => renderBurstResults());
+  wrap.append(back);
+  openDialog("Largest difference in this group", wrap);
+}
+
+function renderBurstHistory() {
+  const history = state.desk.burst_history || [];
+  const list = node("div", undefined, "results");
+  if (!history.length) list.append(node("p", "No grouping has been applied to this desk yet.", "muted"));
+  for (const entry of history) {
+    const card = node("div", undefined, "dialog-item burst-history");
+    const detail = node("span");
+    detail.append(node("strong", `${entry.mode === "anchor" ? "Representative" : "Mutual"} grouping at ${entry.threshold}+`));
+    detail.append(node("small", ` · ${new Date(entry.created_at).toLocaleString()}`));
+    const groupLines = node("div", undefined, "burst-history-groups");
+    for (const group of entry.groups) {
+      if (group.members.length === 1) continue;
+      const repName = photoById(group.representative)?.name || "(removed photo)";
+      const otherNames = group.members
+        .filter((id) => id !== group.representative)
+        .map((id) => photoById(id)?.name || "(removed photo)")
+        .join(", ");
+      groupLines.append(node("p", `${repName} represents: ${otherNames}`, "muted"));
+    }
+    card.append(detail, groupLines);
+    list.append(card);
+  }
+  const back = action("← Back", () => burst.analysis ? renderBurstResults() : renderBurstSetup());
+  openDialog("Applied grouping history", list, back);
+}
+
+bind("burst-review", "click", () => {
+  if (state.desk.photos.length < 2) {
+    notice("Add at least two same-size photographs before a burst review.");
+    return;
+  }
+  openBurst();
+});
 
 attempt(async () => {
   state.desks = await request("/release/desks");

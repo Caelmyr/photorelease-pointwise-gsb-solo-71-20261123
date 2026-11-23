@@ -9,6 +9,7 @@ from image_lab.validation import Invalid
 MAX_PHOTOS = 24
 MAX_MARKS = 40
 MAX_ISSUES = 24
+MAX_BURST_HISTORY = 10
 COVER_COLORS = {"ink": "#191923", "paper": "#eeebe1"}
 MARK_TYPES = ("cover", "keep")
 EXPORT_EDGES = {"screen": 1600, "web": 960, "small": 540}
@@ -92,7 +93,7 @@ def new_desk(title):
     return {
         "id": key(), "title": text(title, "Desk title", 90, True),
         "revision": 0, "created_at": stamp, "updated_at": stamp,
-        "photos": [], "issues": [],
+        "photos": [], "issues": [], "burst_history": [],
     }
 
 
@@ -102,7 +103,7 @@ def photo_record(name, dimensions, working, source, *, provenance, origin=None):
         "id": key(), "name": text(name, "Photo title", 100, True),
         "width": width, "height": height, "working": working, "source": source,
         "provenance": provenance, "origin": origin, "used": True, "approved": False,
-        "style": default_style(), "marks": [],
+        "style": default_style(), "marks": [], "represented_by": None,
     }
 
 
@@ -145,3 +146,57 @@ def summarize(desk):
         "id": desk["id"], "title": desk["title"], "updated_at": desk["updated_at"],
         "photo_count": len(desk["photos"]), "issue_count": len(desk["issues"]),
     }
+
+
+def apply_burst(desk, data):
+    """Apply one reviewed grouping plan to the current draft only.
+
+    Only photos in multi-photo groups change: the chosen representative stays
+    selectable and every other member is unchecked with a back-reference.
+    Saved issues are never touched.
+    """
+    mode = choice(data.get("mode"), ("anchor", "pairwise"), "grouping mode")
+    threshold = integer(data.get("threshold"), "Similarity threshold", 0, 100)
+    groups = data.get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise Invalid("The grouping plan contains no groups.")
+    plan = []
+    seen = set()
+    for entry in groups:
+        if not isinstance(entry, dict) or not isinstance(entry.get("members"), list) or not entry["members"]:
+            raise Invalid("Each group needs a member list.")
+        members = [identifier(value) for value in entry["members"]]
+        representative = identifier(entry.get("representative", members[0]))
+        if representative not in members:
+            raise Invalid("The representative must belong to its group.")
+        for photo_id in members:
+            if photo_id in seen:
+                raise Invalid("A photograph appears in more than one group.")
+            seen.add(photo_id)
+        plan.append((members, representative))
+    records = {photo["id"]: photo for photo in desk["photos"]}
+    missing = seen - set(records)
+    if missing:
+        raise Invalid("A photograph in this plan no longer exists on the desk.")
+    first = records[plan[0][0][0]]
+    box = rectangle(data.get("box"), first["width"], first["height"], "Watch region")
+    burst_id = key()
+    for members, representative in plan:
+        if len(members) == 1:
+            continue
+        records[representative]["used"] = True
+        records[representative]["represented_by"] = None
+        for photo_id in members:
+            if photo_id == representative:
+                continue
+            photo = records[photo_id]
+            photo["used"] = False
+            photo["approved"] = False
+            photo["represented_by"] = representative
+    desk.setdefault("burst_history", []).insert(0, {
+        "id": burst_id, "created_at": now(), "mode": mode,
+        "threshold": threshold, "box": box,
+        "groups": [{"representative": representative, "members": members} for members, representative in plan],
+    })
+    del desk["burst_history"][MAX_BURST_HISTORY:]
+    return burst_id
