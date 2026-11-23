@@ -1,0 +1,1 @@
+"""Local photographic publication desk."""

@@ -1,0 +1,23 @@
+name: solo74-photorelease
+services:
+  desk:
+    build:
+      context: .
+      args:
+        PHOTORELEASE_RUNTIME_IMAGE: ${PHOTORELEASE_RUNTIME_IMAGE:-python:3.12-slim}
+    image: ${PHOTORELEASE_IMAGE:-solo74-photorelease:1.0}
+    network_mode: bridge
+    environment:
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    ports:
+      - "127.0.0.1:${PHOTORELEASE_PORT:-19994}:8000"
+    volumes:
+      - photo-library:/var/lib/photorelease
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/release/health', timeout=3).status == 200"]
+      interval: 3s
+      timeout: 4s
+      retries: 12
+volumes:
+  photo-library:

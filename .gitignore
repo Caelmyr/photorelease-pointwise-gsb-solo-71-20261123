@@ -1,0 +1,4 @@
+.photorelease/
+.venv/
+__pycache__/
+*.pyc

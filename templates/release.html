@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhotoRelease</title>
+  <link rel="stylesheet" href="/static/release.css">
+  <script src="/static/release.js" defer></script>
+</head>
+<body>
+  <header class="appbar">
+    <a class="brand" href="/" aria-label="PhotoRelease home"><span class="brand-symbol" aria-hidden="true"></span>PhotoRelease</a>
+    <nav aria-label="Workspaces">
+      <a href="/prepare">Image preparation ↗</a>
+      <button id="inspect-issue" type="button">Verify a ZIP</button>
+    </nav>
+  </header>
+  <div class="shell">
+    <aside class="library" aria-label="Photo library">
+      <div class="section-line"><h2>Desks</h2><button class="icon" id="new-desk" type="button" aria-label="Create desk">+</button></div>
+      <div id="desk-list" class="desks"></div>
+      <button id="load-demo" type="button" class="sample-button">Load sample desk</button>
+      <section id="photo-library" hidden>
+        <div class="section-line"><h2>Photos</h2><button class="icon" id="upload-photo" type="button" aria-label="Add photo">+</button></div>
+        <div id="photo-list" class="photos"></div>
+        <button id="add-prepared" type="button" class="prepare-button">Add from preparation ↗</button>
+      </section>
+    </aside>
+
+    <main>
+      <section id="welcome" class="welcome">
+        <p class="eyebrow">PHOTO PUBLICATION DESK</p>
+        <h1>Review the frame.<br>Share the proof.</h1>
+        <p>Add photographs, mark details to cover, and check the exact image before saving a public issue.</p>
+        <button id="welcome-demo" type="button" class="primary">Open the sample desk →</button>
+      </section>
+      <div id="workspace" hidden>
+        <header class="desk-head">
+          <div><p class="eyebrow">PUBLICATION DESK</p><h1 id="desk-title"></h1></div>
+          <div class="header-actions">
+            <button id="contact-sheet" type="button">Contact sheet</button>
+            <button id="show-issues" type="button">Issue history <span id="issue-count"></span></button>
+            <button id="make-issue" type="button" class="primary">Create issue</button>
+          </div>
+        </header>
+        <div id="empty-desk" class="empty" hidden>
+          <h2>Add the first photo</h2>
+          <p>Upload a photo or choose a source from Image preparation.</p>
+          <button id="empty-upload" class="primary" type="button">Upload photo</button>
+        </div>
+        <section id="photo-workspace" class="work-grid" hidden>
+          <div class="image-side">
+            <header class="proof-header"><div><p id="provenance" class="eyebrow"></p><h2 id="photo-title"></h2></div><span class="photo-state" id="review-state"></span></header>
+            <div class="tools" role="group" aria-label="Photo view and mark tools">
+              <div class="view-switch"><button type="button" data-view="working">Source</button><button type="button" data-view="draft">Public preview</button></div>
+              <div id="mark-tools" class="mark-tools"><button type="button" data-tool="crop">Set crop</button><button type="button" data-tool="cover">Cover region</button><button type="button" data-tool="keep">Mark keep region</button></div>
+            </div>
+            <div class="stage"><div class="frame"><img id="canvas-photo" alt=""><svg id="overlay" aria-label="Draw a box on the source photo"></svg></div></div>
+            <div class="stage-foot"><span id="view-size"></span><span id="tool-help"></span></div>
+          </div>
+          <aside class="inspector" aria-label="Photo settings">
+            <section>
+              <div class="section-line"><h2>Output settings</h2><button type="button" id="reset-crop">Full photo</button></div>
+              <form id="styling">
+                <label>Long edge <select name="edge"><option value="screen">Up to 1,600 px</option><option value="web">Up to 960 px</option><option value="small">Up to 540 px</option></select></label>
+                <label>File type <select name="format"><option value="png">PNG</option><option value="jpg">JPEG</option></select></label>
+                <label>Cover color <select name="cover"><option value="ink">Ink</option><option value="paper">Paper</option></select></label>
+                <label class="caption">Public caption <input name="caption" maxlength="140" placeholder="Optional caption"></label>
+                <button type="submit">Apply settings</button>
+              </form>
+            </section>
+            <section><div class="section-line"><h2>Marks</h2><span id="mark-count"></span></div><div id="mark-list" class="marks"></div></section>
+            <section class="review-panel">
+              <div class="section-line"><h2>Issue selection</h2><label class="toggle"><input id="include-photo" type="checkbox"> Include</label></div>
+              <div class="order"><button id="earlier" type="button">← Earlier</button><button id="later" type="button">Later →</button></div>
+              <button id="approve-photo" type="button" class="primary">Approve public preview</button>
+            </section>
+          </aside>
+        </section>
+      </div>
+    </main>
+  </div>
+  <dialog id="dialog">
+    <div class="dialog-head"><h2 id="dialog-title"></h2><button id="close-dialog" class="icon" type="button" aria-label="Close dialog">×</button></div>
+    <div id="dialog-content"></div>
+  </dialog>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <input id="photo-file" type="file" accept="image/png,image/jpeg,image/webp,image/tiff" hidden>
+  <input id="issue-file" type="file" accept=".zip,application/zip" hidden>
+</body>
+</html>
