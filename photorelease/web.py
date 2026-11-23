@@ -4,7 +4,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, send_f
 
 from image_lab.validation import Invalid
 
-from . import demo, images, issues, model
+from . import demo, images, issues, model, packaging
 from .store import Library
 
 
@@ -198,13 +198,30 @@ def install(app, directory):
         ]
         return image_response(images.sheet_page(items, "Working contact sheet", page))
 
+    @release.post("/desks/<key>/package-plans")
+    def package_plans(key):
+        data = body()
+        title = model.text(data.get("title", ""), "Public issue title", 75, True)
+        cap = packaging.parse_cap(data.get("cap_bytes"))
+        floor = packaging.parse_floor(data.get("min_quality"))
+        lead_id = data.get("lead_photo_id")
+        if lead_id is not None and lead_id != "":
+            lead_id = model.identifier(lead_id)
+        else:
+            lead_id = None
+        desk = library.open(key)
+        return jsonify(packaging.build_plans(library, desk, cap, floor, lead_id, title))
+
     @release.post("/desks/<key>/issues")
     def create_issue(key):
         data = body()
         title = model.text(data.get("title", ""), "Public issue title", 75, True)
+        plan = data.get("plan")
+        if plan is not None and not isinstance(plan, dict):
+            raise Invalid("The chosen package plan must be an object.")
 
         def change(desk):
-            issues.build_issue(library, desk, title)
+            issues.build_issue(library, desk, title, plan)
 
         return jsonify(library.mutate(key, data.get("revision"), change)), 201
 

@@ -118,6 +118,26 @@ dialog::backdrop { background: #24232f99; }
 .image-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 10px 0; }
 .image-compare figure { margin: 0; }
 .image-compare figcaption { font-size: .79rem; color: var(--muted); }
+.plan-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem .9rem; }
+.plan-form label { display: grid; gap: 3px; }
+.plan-form label.wide { grid-column: 1 / -1; }
+.plan-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+.plan-card { border: 1px solid var(--line); border-radius: 9px; padding: 12px; background: #fff; display: grid; gap: 8px; align-content: start; }
+.plan-card.chosen { border-color: var(--violet); box-shadow: 0 0 0 2px #7462cd44; }
+.plan-card h3 { font-size: .98rem; }
+.plan-card .plan-meta { color: var(--muted); font-size: .78rem; display: grid; gap: 2px; }
+.plan-card table { width: 100%; border-collapse: collapse; font-size: .76rem; }
+.plan-card th, .plan-card td { text-align: right; padding: 4px 5px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.plan-card th:first-child, .plan-card td:first-child { text-align: left; }
+.plan-card th { color: var(--muted); font-weight: 650; }
+.plan-card tfoot td { font-weight: 750; border-bottom: 0; }
+.plan-badge { display: inline-block; font-size: .68rem; font-weight: 750; color: var(--green); background: #e2eee6; padding: 2px 7px; border-radius: 5px; }
+.plan-badge.locked { color: var(--muted); background: #efede7; }
+.infeasible { border: 1px solid #c98c76; background: #f7ece7; border-radius: 9px; padding: 12px 14px; margin: 10px 0; display: grid; gap: 6px; }
+.infeasible table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+.infeasible th, .infeasible td { text-align: right; padding: 4px 5px; border-bottom: 1px solid #d9c1b8; font-variant-numeric: tabular-nums; }
+.infeasible th:first-child, .infeasible td:first-child { text-align: left; }
+.plan-note { color: var(--muted); font-size: .78rem; }
 #notice:not(:empty) { position: fixed; z-index: 3; bottom: 15px; right: 15px; padding: 12px 18px; background: #302b49; color: white; border-radius: 7px; max-width: min(420px, 90vw); }
 @media (max-width: 1120px) { .shell { grid-template-columns: 185px minmax(0, 1fr); } main { padding-inline: 14px; } .work-grid { grid-template-columns: minmax(0, 1fr) 238px; } }
 @media (max-width: 820px) { .shell { grid-template-columns: 150px minmax(0, 1fr); } .work-grid { grid-template-columns: 1fr; } .desk-head { align-items: start; flex-direction: column; } .photo-item { grid-template-columns: 1fr; } }

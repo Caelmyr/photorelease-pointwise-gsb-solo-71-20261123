@@ -1,7 +1,7 @@
 "use strict";
 
 const byId = (id) => document.getElementById(id);
-const state = {desks: [], desk: null, photo: null, view: "working", tool: null, drag: null, review: null};
+const state = {desks: [], desk: null, photo: null, view: "working", tool: null, drag: null, review: null, plans: null};
 const dialog = byId("dialog");
 const dialogContent = byId("dialog-content");
 const overlay = byId("overlay");
@@ -432,13 +432,20 @@ async function showIssue(issueId) {
   for (const photo of issue.photos) {
     const row = node("div", undefined, "dialog-item");
     const text = node("span", photo.caption || photo.name);
-    text.append(node("small", ` · ${photo.width} × ${photo.height} px`));
+    const detail = photo.jpeg_quality === null || photo.jpeg_quality === undefined
+      ? `${photo.width} × ${photo.height} px · PNG · ${formatBytes(photo.bytes)}`
+      : `${photo.width} × ${photo.height} px · JPEG Q${photo.jpeg_quality} · ${formatBytes(photo.bytes)}`;
+    text.append(node("small", ` · ${detail}`));
     row.append(text, link("Open saved photo", `${deskURL()}/issues/${issueId}/photos/${photo.source_id}`));
     list.append(row);
   }
   const actions = node("div", undefined, "dialog-actions");
   actions.append(action("← Issue history", showIssueHistory), link("Download ZIP", `${deskURL()}/issues/${issueId}/download`));
-  openDialog(issue.title, list, actions);
+  const children = [list];
+  if (issue.manifest) {
+    children.push(node("p", `Manifested contents total ${formatBytes(issue.manifest.photos.reduce((sum, row) => sum + row.bytes, 0) + issue.manifest.contact_sheets.reduce((sum, row) => sum + row.bytes, 0))} before ZIP packaging.`, "plan-note"));
+  }
+  openDialog(issue.title, ...children, actions);
 }
 
 function compareDialog() {
@@ -482,6 +489,213 @@ function compareDialog() {
     result.append(node("p", `${report.changed_pixels} of ${report.total_pixels} pixels differ. Maximum channel difference: ${report.maximum_channel_delta}.`), map);
   }));
   openDialog("Compare issues for this photo", form, result, action("← Issue history", showIssueHistory));
+}
+
+function formatBytes(value) {
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function labelFor(photo) {
+  return photo.style.caption || photo.name;
+}
+
+function openPlanDialog() {
+  const included = state.desk.photos.filter((photo) => photo.used);
+  const form = node("form", undefined, "plan-form");
+  const titleField = node("label", "Public issue title");
+  titleField.classList.add("wide");
+  const titleInput = node("input");
+  titleInput.value = state.desk.title;
+  titleInput.maxLength = 75;
+  titleInput.required = true;
+  titleField.append(titleInput);
+
+  const capField = node("label", "Total package cap (MB)");
+  const capInput = node("input");
+  capInput.type = "number";
+  capInput.min = "0.5";
+  capInput.max = "96";
+  capInput.step = "0.5";
+  capInput.value = "25";
+  capInput.required = true;
+  capField.append(capInput);
+
+  const qualityField = node("label", "Minimum JPEG quality");
+  const qualityInput = node("input");
+  qualityInput.type = "number";
+  qualityInput.min = "40";
+  qualityInput.max = "92";
+  qualityInput.step = "1";
+  qualityInput.value = "70";
+  qualityInput.required = true;
+  qualityField.append(qualityInput);
+
+  const leadField = node("label", "Long-read lead photo");
+  leadField.classList.add("wide");
+  const leadSelect = node("select");
+  for (const photo of included) {
+    const option = node("option", labelFor(photo));
+    option.value = photo.id;
+    leadSelect.append(option);
+  }
+  leadField.append(leadSelect);
+
+  const compare = node("button", "Compare two shippable plans", "primary");
+  compare.type = "submit";
+  form.append(titleField, capField, qualityField, leadField, compare);
+
+  const result = node("div");
+  form.addEventListener("submit", attempt(async (event) => {
+    event.preventDefault();
+    result.replaceChildren();
+    const capBytes = Math.round(Number(capInput.value) * 1024 * 1024);
+    const plans = await request(`${deskURL()}/package-plans`, "POST", {
+      title: titleInput.value,
+      cap_bytes: capBytes,
+      min_quality: qualityInput.valueAsNumber,
+      lead_photo_id: leadSelect.value,
+    });
+    state.plans = plans;
+    renderPlanResults(plans, result, {
+      title: titleInput.value, capBytes, minQuality: qualityInput.valueAsNumber, leadId: leadSelect.value,
+    });
+  }));
+  openDialog("Create public issue", form, node("p", "PNG photos, contact sheets, the manifest and ZIP overhead stay fixed; only JPEG quality is adjusted.", "plan-note"), result);
+}
+
+function planTable(plan, included) {
+  const table = node("table");
+  const head = node("thead");
+  const headRow = node("tr");
+  for (const text of ["Photo", "Format", "Quality", "File size"]) {
+    headRow.append(node("th", text));
+  }
+  head.append(headRow);
+  const body = node("tbody");
+  for (const row of plan.photos) {
+    const tr = node("tr");
+    const name = included.find((photo) => photo.id === row.source_id)?.name ?? row.name;
+    tr.append(
+      node("td", name),
+      node("td", row.format.toUpperCase()),
+      node("td", row.jpeg_quality === null ? "fixed PNG" : `Q${row.jpeg_quality}`),
+      node("td", formatBytes(row.bytes)),
+    );
+    body.append(tr);
+  }
+  const foot = node("tfoot");
+  const sheetBytes = plan.contact_sheets.reduce((sum, sheet) => sum + sheet.bytes, 0);
+  foot.append(
+    summaryRow("Contact sheets", formatBytes(sheetBytes)),
+    summaryRow("Manifest", formatBytes(plan.manifest_bytes)),
+    summaryRow("ZIP overhead", formatBytes(plan.overhead_bytes)),
+    summaryRow("Total ZIP", formatBytes(plan.total_bytes)),
+  );
+  table.append(head, body, foot);
+  return table;
+}
+
+function summaryRow(label, value) {
+  const tr = node("tr");
+  const first = node("td", label);
+  const last = node("td", value);
+  last.colSpan = 3;
+  tr.append(first, last);
+  return tr;
+}
+
+function planCard(headline, plan, included, badge) {
+  const card = node("div", undefined, "plan-card");
+  const heading = node("div");
+  heading.append(node("h3", headline), node("span", " "), badge);
+  const qualities = plan.photos.filter((row) => row.jpeg_quality !== null).map((row) => row.jpeg_quality);
+  const qualityText = qualities.length
+    ? `JPEG quality ${Math.min(...qualities)}–${Math.max(...qualities)}`
+    : "No JPEG photos";
+  const meta = node("div", undefined, "plan-meta");
+  meta.append(
+    node("span", qualityText),
+    node("span", `Total ZIP ${formatBytes(plan.total_bytes)}`),
+  );
+  card.append(heading, meta, planTable(plan, included));
+  return card;
+}
+
+function renderPlanResults(plans, container, settings) {
+  const included = state.desk.photos.filter((photo) => photo.used);
+  if (!plans.feasible) {
+    renderInfeasible(plans, container, settings);
+    return;
+  }
+  const cards = node("div", undefined, "plan-results");
+  const balancedCard = planCard(
+    "Balanced: spread the loss evenly",
+    plans.balanced, included, node("span", "minimizes the deepest quality drop", "plan-badge"),
+  );
+  const leadName = included.find((photo) => photo.id === plans.lead_photo_id)?.name ?? "Lead photo";
+  const leadCard = planCard(
+    `Lead-protected: ${leadName}`,
+    plans.lead, included, node("span", "lead kept at the highest quality", "plan-badge locked"),
+  );
+  cards.append(balancedCard, leadCard);
+
+  const actions = node("div", undefined, "dialog-actions");
+  const choose = (card, plan) => action(`Issue this plan · ${formatBytes(plan.total_bytes)}`, async () => {
+    for (const element of cards.children) element.classList.remove("chosen");
+    card.classList.add("chosen");
+    const desk = await mutate(`${deskURL()}/issues`, "POST", {
+      title: settings.title,
+      plan: {
+        kind: plan.kind,
+        cap_bytes: settings.capBytes,
+        min_quality: settings.minQuality,
+        lead_photo_id: settings.leadId,
+        qualities: plan.qualities,
+      },
+    });
+    dialog.close();
+    state.desk = desk;
+    showIssueHistory();
+  }, "primary");
+  actions.append(choose(balancedCard, plans.balanced), choose(leadCard, plans.lead));
+  container.replaceChildren(cards, actions,
+    node("p", "Both plans keep the current crop, pixel dimensions and PNG/JPEG choice. Approving a plan issues that exact ZIP; earlier issues stay available unchanged in Issue history.", "plan-note"));
+}
+
+function renderInfeasible(plans, container, settings) {
+  const fixed = plans.fixed;
+  const box = node("div", undefined, "infeasible");
+  const overflow = fixed.floor_total_bytes - plans.cap_bytes;
+  box.append(
+    node("h3", "No package fits the cap, even at the lowest JPEG quality."),
+    node("p", `At quality Q${plans.min_quality} the ZIP is ${formatBytes(fixed.floor_total_bytes)}, ${formatBytes(overflow)} over the ${formatBytes(plans.cap_bytes)} cap. Your draft settings are kept; nothing was changed or issued.`),
+  );
+  const table = node("table");
+  const body = node("tbody");
+  for (const row of fixed.rows) {
+    const tr = node("tr");
+    tr.append(
+      node("td", row.name),
+      node("td", row.format.toUpperCase()),
+      node("td", row.fixed ? "fixed" : `Q${plans.min_quality} floor`),
+      node("td", formatBytes(row.bytes)),
+    );
+    body.append(tr);
+  }
+  body.append(
+    summaryRow("Contact sheets", formatBytes(fixed.sheet_bytes)),
+    summaryRow("Manifest", formatBytes(fixed.manifest_bytes)),
+    summaryRow("ZIP overhead", formatBytes(fixed.overhead_bytes)),
+    summaryRow("Fixed subtotal (PNGs + sheets + manifest + overhead)", formatBytes(fixed.fixed_bytes)),
+    summaryRow(`JPEG photos at Q${plans.min_quality}`, formatBytes(fixed.jpeg_floor_bytes)),
+    summaryRow("Smallest possible ZIP", formatBytes(fixed.floor_total_bytes)),
+  );
+  table.append(body);
+  box.append(table);
+  box.append(node("p", "Raise the package cap, lower the minimum JPEG quality, switch a JPEG to a smaller output edge, or exclude a photo — then compare again.", "plan-note"));
+  container.replaceChildren(box);
 }
 
 async function inspectZip(file) {
@@ -529,10 +743,7 @@ bind("make-issue", "click", () => {
       })));
     return;
   }
-  dialogForm("Create public issue", "Public issue title", "", 75, "Save issue", async (title) => {
-    await mutate(`${deskURL()}/issues`, "POST", {title});
-    showIssueHistory();
-  });
+  openPlanDialog();
 });
 bind("reset-crop", "click", () => editPhoto({style: {crop: null}}));
 bind("styling", "submit", async (event) => {

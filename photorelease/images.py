@@ -16,12 +16,13 @@ SHEET_BACKGROUND = "#e7e5de"
 SHEET_PAGE_LIMIT = 6
 
 
-def encode(image, format_name="png"):
+def encode(image, format_name="png", quality=None):
     # Rebuild the pixel-bearing object so encoder metadata cannot follow the source.
     clean = Image.frombytes("RGB", image.size, image.convert("RGB").tobytes())
     target = BytesIO()
     if format_name == "jpg":
-        clean.save(target, "JPEG", quality=92, subsampling=0, optimize=True)
+        level = model.JPEG_QUALITY_MAX if quality is None else quality
+        clean.save(target, "JPEG", quality=level, subsampling=0, optimize=True)
     else:
         clean.save(target, "PNG", compress_level=4)
     return target.getvalue()
@@ -41,7 +42,7 @@ def from_upload(blobs, raw, filename):
         raise Invalid("A source image must be 24 MB or less.")
     try:
         with Image.open(BytesIO(raw)) as candidate:
-            if candidate.format not in INPUT_FORMATS or candidate.n_frames != 1:
+            if candidate.format not in INPUT_FORMATS or getattr(candidate, "n_frames", 1) != 1:
                 raise Invalid("Choose a single-frame PNG, JPEG, WebP or TIFF.")
     except (OSError, Image.DecompressionBombError) as error:
         raise Invalid("The selected file could not be read as a supported photograph.") from error

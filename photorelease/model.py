@@ -13,6 +13,12 @@ COVER_COLORS = {"ink": "#191923", "paper": "#eeebe1"}
 MARK_TYPES = ("cover", "keep")
 EXPORT_EDGES = {"screen": 1600, "web": 960, "small": 540}
 FORMATS = {"png": "image/png", "jpg": "image/jpeg"}
+JPEG_QUALITY_MAX = 92
+JPEG_QUALITY_FLOOR = 40
+PACKAGE_CAP_MIN = 512 * 1024
+MANIFEST_NAME = "release.json"
+RELEASE_SCHEMA = "photorelease-public-v1"
+MAX_ARCHIVE = 96 * 1024 * 1024
 KEY = re.compile(r"[0-9a-f]{32}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 

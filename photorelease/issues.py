@@ -1,18 +1,16 @@
 from io import BytesIO
 from pathlib import PurePosixPath
-from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile
-
-from PIL import Image
+from zipfile import BadZipFile, ZipFile
 
 from image_lab.validation import Invalid
 
-from . import images, model
-from .store import json_bytes, sha256
+from . import images, model, packaging
+from .store import sha256
 
 
-MANIFEST = "release.json"
-SCHEMA = "photorelease-public-v1"
-MAX_ARCHIVE = 96 * 1024 * 1024
+MANIFEST = model.MANIFEST_NAME
+SCHEMA = model.RELEASE_SCHEMA
+MAX_ARCHIVE = model.MAX_ARCHIVE
 
 
 def used_photos(desk):
@@ -20,15 +18,24 @@ def used_photos(desk):
 
 
 def archive_bytes(files):
+    from zipfile import ZIP_STORED
+
     output = BytesIO()
     with ZipFile(output, "w", allowZip64=False) as archive:
+        # Stored (not deflated) members keep planned and issued ZIP sizes identical.
         for name, data in files.items():
-            compression = ZIP_DEFLATED if name == MANIFEST else ZIP_STORED
-            archive.writestr(name, data, compress_type=compression)
+            archive.writestr(name, data, compress_type=ZIP_STORED)
     return output.getvalue()
 
 
-def build_issue(library, desk, title):
+def _default_qualities(selection):
+    return [
+        model.JPEG_QUALITY_MAX if photo["style"]["format"] == "jpg" else None
+        for photo in selection
+    ]
+
+
+def build_issue(library, desk, title, plan=None):
     if len(desk["issues"]) >= model.MAX_ISSUES:
         raise Invalid(f"A desk can retain up to {model.MAX_ISSUES} issues.")
     selection = used_photos(desk)
@@ -36,49 +43,42 @@ def build_issue(library, desk, title):
         raise Invalid("Include at least one photo to create an issue.")
     if any(not photo["approved"] for photo in selection):
         raise Invalid("Approve every included photo in the current draft before issuing it.")
+
+    if plan is None:
+        qualities = _default_qualities(selection)
+        cap = MAX_ARCHIVE
+    else:
+        cap = packaging.parse_cap(plan.get("cap_bytes"))
+        floor = packaging.parse_floor(plan.get("min_quality"))
+        qualities = _plan_qualities(selection, plan, floor)
+
+    planner = packaging.PackagePlanner(library.blobs, selection)
+    assembly = planner.assemble(qualities, title)
+    if len(assembly["zip_bytes"]) > cap:
+        raise Invalid("The chosen package no longer fits the cap. Re-open the package plans and try again.")
+    if len(assembly["zip_bytes"]) > MAX_ARCHIVE - 128 * 1024:
+        raise Invalid("The issue is too large to verify. Use a smaller output size or fewer large photos.")
+
     issue_id = model.key()
     created = model.now()
-    archive_members = {}
-    public_photos, private_photos, sheet_items = [], [], []
-    total_bytes = 0
-    for index, photo in enumerate(selection, start=1):
-        style = photo["style"]
-        rendered = images.create_rendition(library.blobs, photo)
-        payload = images.encode(rendered, style["format"])
-        total_bytes += len(payload)
-        _budget(total_bytes)
-        path = f"photos/{index:02d}.{style['format']}"
-        record = {
-            "path": path, "width": rendered.width, "height": rendered.height,
-            "caption": style["caption"], "sha256": sha256(payload), "bytes": len(payload),
-        }
-        public_photos.append(record)
+    assembly = planner.assemble(qualities, title, issue_id=issue_id, created_at=created)
+    manifest = assembly["manifest"]
+    archive_members = assembly["archive_members"]
+    zip_payload = archive_bytes(archive_members)
+
+    private_photos = []
+    for row, photo in zip(assembly["rows"], selection):
         private_photos.append({
-            **record, "source_id": photo["id"], "file": library.blobs.put(payload),
+            "path": row["path"], "width": row["width"], "height": row["height"],
+            "caption": row["caption"], "sha256": row["sha256"], "bytes": row["bytes"],
+            "jpeg_quality": row["jpeg_quality"],
+            "source_id": photo["id"], "file": library.blobs.put(archive_members[row["path"]]),
             "crop": images.extent(photo), "name": photo["name"],
         })
-        archive_members[path] = payload
-        thumbnail = images.open_bytes(payload)
-        thumbnail.thumbnail((304, 180), Image.Resampling.LANCZOS)
-        sheet_items.append((thumbnail, style["caption"] or f"Photo {index:02d}"))
-    sheets = []
-    for number, items in enumerate(images.sheet_pages(sheet_items), start=1):
-        raster = images.sheet_page(items, title, number)
-        path = f"contact/{number:02d}.png"
-        payload = images.encode(raster)
-        total_bytes += len(payload)
-        _budget(total_bytes)
-        archive_members[path] = payload
-        sheets.append({"path": path, "sha256": sha256(payload), "bytes": len(payload)})
-    manifest = {
-        "schema": SCHEMA, "issue": issue_id, "title": title, "created_at": created,
-        "photos": public_photos, "contact_sheets": sheets,
-    }
-    archive_members[MANIFEST] = json_bytes(manifest)
     document = {
         "id": issue_id, "title": title, "created_at": created,
         "revision": desk["revision"], "photos": private_photos,
-        "archive": library.blobs.put(archive_bytes(archive_members)), "manifest": manifest,
+        "archive": library.blobs.put(zip_payload), "manifest": manifest,
     }
     library.save_issue(document)
     summary = {field: document[field] for field in ("id", "title", "created_at", "revision")}
@@ -87,9 +87,24 @@ def build_issue(library, desk, title):
     return document
 
 
-def _budget(total):
-    if total > MAX_ARCHIVE - 128 * 1024:
-        raise Invalid("The issue is too large to verify. Use a smaller output size or fewer large photos.")
+def _plan_qualities(selection, plan, floor):
+    kind = model.choice(plan.get("kind"), ("balanced", "lead"), "package plan")
+    lead_id = plan.get("lead_photo_id")
+    if lead_id is not None:
+        model.select(selection, lead_id, "Lead photo")
+    offered = plan.get("qualities")
+    if not isinstance(offered, list) or len(offered) != len(selection):
+        raise Invalid("The chosen package plan does not match the current selection.")
+    qualities = []
+    for entry, photo in zip(offered, selection):
+        if photo["style"]["format"] == "png":
+            if entry is not None:
+                raise Invalid("The chosen package plan does not match the current photo formats.")
+            qualities.append(None)
+        else:
+            quality = model.integer(entry, "Planned JPEG quality", floor, model.JPEG_QUALITY_MAX)
+            qualities.append(quality)
+    return qualities
 
 
 def issue_photo(document, source_id):
